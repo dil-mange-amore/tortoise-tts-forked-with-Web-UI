@@ -14,6 +14,25 @@ A live demo is hosted on Hugging Face Spaces. If you'd like to avoid a queue, pl
 
 https://huggingface.co/spaces/Manmay/tortoise-tts
 
+## Quick Start (Recommended)
+
+**New! Web UI for easy TTS generation with visual interface, real-time progress tracking, and audio playlist.**
+
+```shell
+conda create --name tortoise python=3.11 numba inflect -y
+conda activate tortoise
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+git clone https://github.com/neonbjb/tortoise-tts.git
+cd tortoise-tts
+pip install -e .
+pip install flask soundfile
+
+# Start the web interface
+python web_ui.py
+```
+
+Then open http://localhost:5000 in your browser!
+
 ## Install via pip
 ```bash
 pip install tortoise-tts
@@ -68,14 +87,16 @@ pip install transformers==4.29.2
 git clone https://github.com/neonbjb/tortoise-tts.git
 cd tortoise-tts
 pip install -e .
+pip install flask soundfile==0.12.1
 ```
+
+> [!IMPORTANT]
+> **Python 3.11 is required** - PyTorch does not support Python 3.13+. Use `soundfile==0.12.1` to avoid compatibility issues.
 
 Optionally, pytorch can be installed in the base environment, so that other conda environments can use it too. To do this, simply send the `conda install pytorch...` line before activating the tortoise environment.
 
 > [!NOTE]  
 > When you want to use tortoise-tts, you will always have to ensure the `tortoise` conda environment is activated.
-
-If you are on windows, you may also need to install pysoundfile: `conda install -c conda-forge pysoundfile`
 
 ### Docker
 
@@ -133,6 +154,49 @@ pip install .
 Be aware that DeepSpeed is disabled on Apple Silicon since it does not work. The flag `--use_deepspeed` is ignored.
 You may need to prepend `PYTORCH_ENABLE_MPS_FALLBACK=1` to the commands below to make them work since MPS does not support all the operations in Pytorch.
 
+
+### Web UI (Recommended)
+
+**The easiest way to use Tortoise TTS!** A full-featured web interface with:
+
+- 🎨 **4-column layout**: Settings, content, audio playlist, and debug console
+- 🎯 **Stage-based progress tracking**: Real-time progress with accurate stage detection
+- 🎵 **Audio playlist**: Persistent playlist with playback controls (localStorage)
+- 📁 **Smart file management**: Auto-save to Music folder with intelligent naming
+- 🎤 **Voice management**: Upload custom voices, delete voices, batch generate .pth files
+- 🔧 **Service controls**: Restart, stop, open output folder
+- 🐞 **Debug console**: Real-time color-coded logs
+- ⏹️ **Cancel generation**: Stop long-running generations
+- 📊 **System monitoring**: CPU, RAM, and GPU usage
+
+```shell
+# Start the web UI
+python web_ui.py
+
+# Or use the provided scripts
+start_webui.bat         # Windows batch file
+start_webui.ps1         # PowerShell script
+```
+
+Then open http://localhost:5000 in your browser.
+
+**Output Location**: Files are automatically saved to `%USERPROFILE%\Music\Tortoise Output`  
+**File Naming**: `{voice}-{preset}-{candidates}x-{number}.wav` (e.g., `tom-fast-1x-001.wav`)
+
+### Voice Preparation
+
+For faster voice loading, pre-compute conditioning latents (.pth files):
+
+```shell
+# Generate .pth for a single voice
+python tortoise\get_conditioning_latents.py --voice VOICE_NAME --output_path tortoise\voices\VOICE_NAME
+
+# Batch generate .pth for all voices (Windows)
+generate_all_pth.bat          # Batch script
+generate_all_pth.ps1          # PowerShell script
+```
+
+Pre-computed .pth files reduce voice loading time from 10-30 seconds to instant.
 
 ### do_tts.py
 
@@ -210,6 +274,35 @@ reference_clips = [utils.audio.load_audio(p, 22050) for p in clips_paths]
 tts = api.TextToSpeech(use_deepspeed=True, kv_cache=True, half=True)
 pcm_audio = tts.tts_with_preset("your text here", voice_samples=reference_clips, preset='fast')
 ```
+
+## Performance Notes
+
+> [!WARNING]
+> **Tortoise TTS is slow by design.** The autoregressive architecture processes sequentially, making it 10-100x slower than diffusion-only models like Stable Diffusion.
+
+**Expected generation times** (RTX 3060, batch_size=4):
+- `ultra_fast`: ~30 seconds (16 autoregressive samples)
+- `fast`: ~8 minutes (96 samples, 24 batches)
+- `standard`: ~20 minutes (256 samples, 64 batches)
+- `high_quality`: ~40+ minutes (256 samples, 100 diffusion steps)
+
+**Optimization tips**:
+1. Use `ultra_fast` for quick testing
+2. Pre-compute voice .pth files (instant loading vs 10-30s)
+3. Reduce `autoregressive_batch_size` if experiencing system instability (default: 4)
+4. Monitor GPU memory usage - reduce candidates or preset if OOM errors occur
+
+See `SPEED_GUIDE.md` for detailed performance information.
+
+## Files and Documentation
+
+- `WEB_UI_README.md` - Comprehensive web UI documentation
+- `QUICK_START.md` - Quick reference guide
+- `SPEED_GUIDE.md` - Performance characteristics explained
+- `TROUBLESHOOTING_RESULTS.md` - Common issues and solutions
+- `SOUNDFILE_FIX.md` - soundfile compatibility fix
+- `voice_customization_guide.md` - Creating custom voices
+- `Advanced_Usage.md` - Advanced features and techniques
 
 ## Acknowledgements
 
