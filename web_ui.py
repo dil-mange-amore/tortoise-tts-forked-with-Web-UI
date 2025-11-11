@@ -15,6 +15,7 @@ import torch
 import torchaudio
 from tortoise.api import TextToSpeech
 from tortoise.utils.audio import load_audio, load_voices
+import numpy as np
 
 app = Flask(__name__)
 app.config['UPLOAD_FOLDER'] = 'tortoise/voices'
@@ -68,6 +69,227 @@ def get_tts():
             add_debug_log(f"Failed to load models: {str(e)}", "error")
             raise
     return tts
+
+def generate_conditioning_latents(voice_name):
+    """
+    Generate conditioning latents (.pth) for a voice.
+    This pre-computes voice embeddings for instant loading.
+    
+    Returns: True if successful, False otherwise
+    """
+    try:
+        add_debug_log(f"Generating .pth file for voice '{voice_name}'...", "info")
+        
+        # Get TTS instance (will use existing if already loaded)
+        tts_instance = get_tts()
+        
+        # Get voice directory
+        voice_dir = os.path.join(app.config['UPLOAD_FOLDER'], voice_name)
+        
+        # Find all audio files in the voice directory
+        audio_files = []
+        for file in os.listdir(voice_dir):
+            if file.endswith(('.wav', '.mp3', '.flac')):
+                audio_files.append(os.path.join(voice_dir, file))
+        
+        if not audio_files:
+            add_debug_log(f"No audio files found for voice '{voice_name}'", "error")
+            return False
+        
+        add_debug_log(f"Loading {len(audio_files)} audio samples...", "info")
+        
+        # Load all audio samples
+        conds = []
+        for audio_path in audio_files:
+            try:
+                c = load_audio(audio_path, 22050)
+                conds.append(c)
+                # Log audio stats for debugging
+                device_str = f", device={c.device}" if torch.is_tensor(c) else ""
+                add_debug_log(f"  ✓ {os.path.basename(audio_path)}: min={c.min():.3f}, max={c.max():.3f}, mean={c.mean():.3f}{device_str}", "info")
+            except Exception as e:
+                add_debug_log(f"Failed to load {os.path.basename(audio_path)}: {str(e)}", "warning")
+        
+        if not conds:
+            add_debug_log("No valid audio samples loaded", "error")
+            return False
+        
+        add_debug_log(f"Computing conditioning latents from {len(conds)} samples...", "info")
+        
+        # Generate conditioning latents
+        conditioning_latents = tts_instance.get_conditioning_latents(conds)
+        
+        # CRITICAL FIX: Move conditioning latents to CPU before saving
+        # This prevents "cuda:0 and cpu device mismatch" errors during generation
+        if isinstance(conditioning_latents, tuple):
+            conditioning_latents = tuple(c.cpu() if torch.is_tensor(c) else c for c in conditioning_latents)
+        elif torch.is_tensor(conditioning_latents):
+            conditioning_latents = conditioning_latents.cpu()
+        
+        add_debug_log("Moved conditioning latents to CPU for saving", "info")
+        
+        # Save to voice directory
+        output_path = os.path.join(voice_dir, f'{voice_name}.pth')
+        torch.save(conditioning_latents, output_path)
+        
+        add_debug_log(f"✅ Saved conditioning latents to {voice_name}.pth", "success")
+        add_debug_log("Voice will now load instantly!", "success")
+        
+        return True
+        
+    except Exception as e:
+        add_debug_log(f"Error generating .pth: {str(e)}", "error")
+        import traceback
+        add_debug_log(traceback.format_exc(), "error")
+        return False
+
+def process_audio_for_cloning(audio_path, output_dir, base_name):
+    """
+    Process audio file for voice cloning:
+    - Split into 10-second segments
+    - Convert to 22050Hz sample rate
+    - Save as WAV with float32 format
+    
+    Returns: list of processed filenames
+    """
+    add_debug_log(f"Processing audio: {audio_path}", "info")
+    
+    try:
+        # Check if file is WebM and convert to WAV first
+        if audio_path.lower().endswith('.webm'):
+            add_debug_log("Converting WebM to WAV...", "info")
+            try:
+                import subprocess
+                # Create temp WAV file
+                temp_wav = audio_path.rsplit('.', 1)[0] + '_temp.wav'
+                
+                # Use ffmpeg to convert WebM to WAV
+                result = subprocess.run(
+                    ['ffmpeg', '-y', '-i', audio_path, '-ar', '22050', '-ac', '1', temp_wav],
+                    capture_output=True,
+                    text=True,
+                    timeout=30
+                )
+                
+                if result.returncode != 0:
+                    add_debug_log(f"FFmpeg error: {result.stderr}", "error")
+                    raise Exception("FFmpeg conversion failed")
+                
+                # Use the converted WAV file
+                audio_path = temp_wav
+                add_debug_log("WebM converted to WAV successfully", "success")
+                
+            except FileNotFoundError:
+                add_debug_log("FFmpeg not found! Installing ffmpeg...", "warning")
+                # Try to install ffmpeg-python
+                subprocess.run([sys.executable, '-m', 'pip', 'install', 'ffmpeg-python'], 
+                             capture_output=True)
+                add_debug_log("Please install FFmpeg: https://ffmpeg.org/download.html", "error")
+                raise Exception("FFmpeg not installed. Please install FFmpeg and add it to PATH.")
+            except subprocess.TimeoutExpired:
+                add_debug_log("WebM conversion timed out", "error")
+                raise Exception("WebM conversion took too long")
+        
+        # Load audio using torchaudio
+        audio, orig_sr = torchaudio.load(audio_path)
+        add_debug_log(f"Loaded audio: {audio.shape} at {orig_sr}Hz", "info")
+        
+        # Convert to mono if stereo
+        if audio.shape[0] > 1:
+            audio = torch.mean(audio, dim=0, keepdim=True)
+            add_debug_log("Converted stereo to mono", "info")
+        
+        # Resample to 22050Hz if needed
+        if orig_sr != 22050:
+            resampler = torchaudio.transforms.Resample(orig_sr, 22050)
+            audio = resampler(audio)
+            add_debug_log(f"Resampled from {orig_sr}Hz to 22050Hz", "info")
+        
+        sr = 22050
+        audio = audio.squeeze(0)  # Remove channel dimension: (1, samples) -> (samples)
+        
+        # Remove DC offset (center audio around zero) - CRITICAL for voice cloning
+        audio = audio - audio.mean()
+        add_debug_log(f"Removed DC offset (mean was {audio.mean():.6f})", "info")
+        
+        # Normalize audio to [-1, 1] range (CRITICAL for Tortoise)
+        max_val = torch.max(torch.abs(audio))
+        if max_val > 0:
+            audio = audio / max_val
+            add_debug_log(f"Normalized audio to [-1, 1] range (max was {max_val:.4f})", "info")
+        else:
+            add_debug_log("⚠️ WARNING: Audio is silent (all zeros)!", "error")
+            raise ValueError("Audio file is silent or corrupted")
+        
+        # Verify audio has both positive and negative values (Tortoise expects this)
+        if not (torch.any(audio > 0) and torch.any(audio < 0)):
+            add_debug_log("⚠️ WARNING: Audio doesn't have both positive and negative values!", "warning")
+            add_debug_log(f"Min: {audio.min():.6f}, Max: {audio.max():.6f}", "warning")
+        
+        # Verify audio quality
+        if torch.any(torch.isnan(audio)) or torch.any(torch.isinf(audio)):
+            add_debug_log("⚠️ WARNING: Audio contains NaN or Inf values!", "error")
+            raise ValueError("Audio file contains invalid values")
+        
+        # Calculate segment length (10 seconds)
+        segment_length = 10 * sr  # 10 seconds * sample_rate
+        total_duration = audio.shape[0] / sr
+        
+        # If audio is shorter than 10 seconds, keep as is
+        if total_duration < 10:
+            add_debug_log(f"Audio is {total_duration:.1f}s - saving as single segment", "warning")
+            output_path = os.path.join(output_dir, f"{base_name}_0.wav")
+            # Save as 16-bit PCM (standard WAV format that Tortoise expects)
+            torchaudio.save(output_path, audio.unsqueeze(0), sr)
+            return [f"{base_name}_0.wav"]
+        
+        # Split into 10-second segments
+        processed_files = []
+        segment_count = int(torch.ceil(torch.tensor(audio.shape[0] / segment_length)).item())
+        
+        add_debug_log(f"Splitting {total_duration:.1f}s audio into {segment_count} segments", "info")
+        
+        for i in range(segment_count):
+            start_idx = i * segment_length
+            end_idx = min((i + 1) * segment_length, audio.shape[0])
+            segment = audio[start_idx:end_idx]
+            
+            # Only save if segment is at least 1 second
+            if segment.shape[0] >= sr:
+                output_filename = f"{base_name}_{i}.wav"
+                output_path = os.path.join(output_dir, output_filename)
+                
+                # Save as 16-bit PCM WAV (standard format that Tortoise expects)
+                # Audio is already normalized to [-1, 1] range above
+                torchaudio.save(output_path, segment.unsqueeze(0), sr)
+                processed_files.append(output_filename)
+                add_debug_log(f"Saved segment {i+1}/{segment_count}: {segment.shape[0]/sr:.1f}s", "info")
+        
+        add_debug_log(f"Successfully processed {len(processed_files)} segments", "success")
+        
+        # Clean up temp WAV file if it was created from WebM
+        if audio_path.endswith('_temp.wav') and os.path.exists(audio_path):
+            try:
+                os.remove(audio_path)
+                add_debug_log("Cleaned up temporary WAV file", "info")
+            except:
+                pass  # Ignore cleanup errors
+        
+        return processed_files
+        
+    except Exception as e:
+        add_debug_log(f"Error processing audio: {str(e)}", "error")
+        import traceback
+        add_debug_log(traceback.format_exc(), "error")
+        
+        # Clean up temp WAV file on error too
+        if 'audio_path' in locals() and audio_path.endswith('_temp.wav') and os.path.exists(audio_path):
+            try:
+                os.remove(audio_path)
+            except:
+                pass
+        
+        raise
 
 def get_available_voices():
     """Get list of available voices from the voices directory"""
@@ -314,7 +536,7 @@ def api_generate():
 
 @app.route('/api/upload_voice', methods=['POST'])
 def api_upload_voice():
-    """Upload custom voice samples"""
+    """Upload custom voice samples with automatic preprocessing for cloning"""
     try:
         voice_name = request.form.get('voice_name', '').strip()
         
@@ -339,31 +561,96 @@ def api_upload_voice():
             add_debug_log("Error: No audio files provided", "error")
             return jsonify({'error': 'No audio files provided'}), 400
         
-        saved_files = []
+        # Create temp directory for original uploads
+        temp_dir = os.path.join(voice_dir, '_temp')
+        os.makedirs(temp_dir, exist_ok=True)
+        
+        all_processed_files = []
+        file_counter = 0
+        
+        add_debug_log("🎙️ Starting audio preprocessing for voice cloning...", "info")
+        add_debug_log("Converting to: 22050Hz, float32 WAV, 10s segments", "info")
+        
         for file in files:
             if file and file.filename:
-                filename = secure_filename(file.filename)
-                if filename.endswith(('.wav', '.mp3', '.flac', '.ogg')):
-                    filepath = os.path.join(voice_dir, filename)
-                    file.save(filepath)
-                    saved_files.append(filename)
-                    add_debug_log(f"Saved file: {filename}", "info")
+                original_filename = secure_filename(file.filename)
+                if original_filename.endswith(('.wav', '.mp3', '.flac', '.ogg', '.m4a')):
+                    # Save to temp location first
+                    temp_filepath = os.path.join(temp_dir, original_filename)
+                    file.save(temp_filepath)
+                    add_debug_log(f"Processing: {original_filename}", "info")
+                    
+                    try:
+                        # Process audio: split, resample, convert to float32 WAV
+                        base_name = f"clip_{file_counter:02d}"
+                        processed = process_audio_for_cloning(temp_filepath, voice_dir, base_name)
+                        all_processed_files.extend(processed)
+                        file_counter += 1
+                    except Exception as e:
+                        add_debug_log(f"Failed to process {original_filename}: {str(e)}", "error")
+                        continue
         
-        if not saved_files:
-            add_debug_log("Error: No valid audio files uploaded", "error")
-            return jsonify({'error': 'No valid audio files uploaded'}), 400
+        # Clean up temp directory
+        import shutil
+        shutil.rmtree(temp_dir)
         
-        add_debug_log(f"Successfully uploaded {len(saved_files)} files for voice '{voice_name}'", "success")
+        if not all_processed_files:
+            add_debug_log("Error: No valid audio files could be processed", "error")
+            return jsonify({'error': 'No valid audio files could be processed'}), 400
+        
+        segment_count = len(all_processed_files)
+        
+        # Check if we have at least 7 segments (recommended minimum)
+        if segment_count < 7:
+            add_debug_log(f"⚠️ Warning: Only {segment_count} segments created", "warning")
+            add_debug_log("Recommendation: Provide more audio (at least 70 seconds total)", "warning")
+            if segment_count < 5:
+                add_debug_log("⚠️ CRITICAL: Less than 5 segments - cloning quality will be poor!", "error")
+        else:
+            add_debug_log(f"✅ Created {segment_count} segments - good for cloning!", "success")
+        
+        add_debug_log(f"Voice '{voice_name}' ready for cloning", "success")
+        
+        # Automatically generate .pth file for instant loading
+        add_debug_log("", "info")  # Blank line for readability
+        add_debug_log("🔄 Automatically generating .pth file...", "info")
+        add_debug_log("💡 NOTE: If voice quality is poor, delete the .pth file and try without it", "warning")
+        add_debug_log("   Tortoise will load audio files directly (slower but may work better)", "warning")
+        
+        pth_success = generate_conditioning_latents(voice_name)
+        
+        if pth_success:
+            pth_message = "Voice ready! .pth file created for instant loading."
+        else:
+            pth_message = "Voice segments created. .pth generation failed (see logs)."
+            add_debug_log("💡 You can manually generate .pth later if needed", "warning")
+        
+        # Determine recommendation message
+        if segment_count < 5:
+            recommendation = 'Critical: Need at least 5 segments (50+ seconds)'
+        elif segment_count < 7:
+            recommendation = 'Warning: Recommended 7+ segments (70+ seconds)'
+        else:
+            recommendation = 'Good for cloning!'
         
         return jsonify({
             'success': True,
-            'message': f'Uploaded {len(saved_files)} files for voice "{voice_name}"',
-            'files': saved_files
+            'message': f'Processed {segment_count} audio segments for voice "{voice_name}"',
+            'files': all_processed_files,
+            'segment_count': segment_count,
+            'pth_generated': pth_success,
+            'recommendation': recommendation,
+            'status': pth_message
         })
         
     except Exception as e:
         error_msg = str(e)
         add_debug_log(f"Error uploading voice: {error_msg}", "error")
+        
+        import traceback
+        tb = traceback.format_exc()
+        add_debug_log(f"Traceback:\n{tb}", "error")
+        
         return jsonify({'error': error_msg}), 500
 
 @app.route('/api/delete_voice/<voice_name>', methods=['DELETE'])
@@ -389,6 +676,130 @@ def api_delete_voice(voice_name):
             
     except Exception as e:
         print(f"Error deleting voice: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/recording/paragraph', methods=['GET'])
+def api_get_recording_paragraph():
+    """Get a random paragraph for voice recording"""
+    import random
+    
+    paragraphs = [
+        "The quick brown fox jumps over the lazy dog. This pangram contains every letter of the alphabet and is commonly used for testing fonts and keyboards.",
+        "In the heart of the city, where neon lights dance against the night sky, stories unfold with every passing moment. Each corner holds a memory, each street a tale waiting to be told.",
+        "Technology has transformed the way we communicate, bringing distant voices closer and making the world feel smaller. Yet the warmth of human connection remains irreplaceable.",
+        "Nature's beauty lies not just in grand mountains and vast oceans, but in the delicate patterns of a single leaf and the gentle rustling of trees in the breeze.",
+        "Every journey begins with a single step, they say. But it's the courage to take that step, despite uncertainty, that defines our adventures and shapes our destinies.",
+        "Music transcends language barriers, speaking directly to the soul. A melody can evoke memories long forgotten, emotions deeply buried, and dreams yet to be realized.",
+        "The art of cooking is more than following recipes. It's about understanding flavors, embracing creativity, and sharing love through every dish we prepare for others.",
+        "Books are gateways to infinite worlds, allowing us to live countless lives, explore distant lands, and understand perspectives vastly different from our own.",
+        "Laughter is universal, cutting through tension and bringing people together. A genuine smile can brighten someone's day and create connections that last a lifetime.",
+        "Time flows like a river, constant yet ever-changing. We cannot step into the same moment twice, which makes each present instant both precious and fleeting.",
+        "Dreams fuel innovation and inspire progress. What seems impossible today becomes tomorrow's reality through determination, creativity, and unwavering belief.",
+        "The ocean's depths remain largely unexplored, holding mysteries and wonders beyond our imagination. Each dive reveals creatures and ecosystems more alien than science fiction.",
+        "Friendship is a garden that requires care and attention. Trust must be nurtured, communication maintained, and support offered freely to help each other grow.",
+        "Morning coffee rituals ground us in routine while offering quiet moments of reflection. That first sip awakens not just the body but the mind's readiness for the day ahead.",
+        "Photography freezes time, capturing emotions and moments that would otherwise fade. Through a lens, ordinary scenes become extraordinary stories worth preserving forever."
+    ]
+    
+    paragraph = random.choice(paragraphs)
+    return jsonify({'paragraph': paragraph})
+
+@app.route('/api/recording/upload', methods=['POST'])
+def api_recording_upload():
+    """Upload recorded audio clips"""
+    try:
+        voice_name = request.form.get('voice_name', '').strip()
+        
+        if not voice_name:
+            return jsonify({'error': 'Voice name is required'}), 400
+        
+        # Sanitize voice name
+        voice_name = secure_filename(voice_name)
+        voice_dir = os.path.join(app.config['UPLOAD_FOLDER'], voice_name)
+        os.makedirs(voice_dir, exist_ok=True)
+        
+        # Create temp directory
+        temp_dir = os.path.join(voice_dir, '_temp')
+        os.makedirs(temp_dir, exist_ok=True)
+        
+        # Get all recorded audio blobs
+        recorded_files = request.files.getlist('recordings')
+        
+        if not recorded_files:
+            return jsonify({'error': 'No recordings provided'}), 400
+        
+        add_debug_log(f"🎙️ Processing {len(recorded_files)} recorded clips for voice '{voice_name}'...", "info")
+        add_debug_log("Converting to: 22050Hz, float32 WAV, 10s segments", "info")
+        
+        all_processed_files = []
+        
+        for idx, audio_file in enumerate(recorded_files):
+            if audio_file and audio_file.filename:
+                # Save recording to temp
+                temp_filepath = os.path.join(temp_dir, f'recording_{idx}.webm')
+                audio_file.save(temp_filepath)
+                
+                try:
+                    # Process the recording
+                    base_name = f"rec_{idx:02d}"
+                    processed = process_audio_for_cloning(temp_filepath, voice_dir, base_name)
+                    all_processed_files.extend(processed)
+                    add_debug_log(f"Processed recording {idx + 1}/{len(recorded_files)}", "info")
+                except Exception as e:
+                    add_debug_log(f"Failed to process recording {idx + 1}: {str(e)}", "error")
+                    continue
+        
+        # Clean up temp directory
+        import shutil
+        shutil.rmtree(temp_dir)
+        
+        if not all_processed_files:
+            return jsonify({'error': 'No valid recordings could be processed'}), 400
+        
+        segment_count = len(all_processed_files)
+        
+        # Check segment count
+        if segment_count < 7:
+            add_debug_log(f"⚠️ Warning: Only {segment_count} segments from recordings", "warning")
+            add_debug_log("Recommendation: Record more clips (at least 7 total)", "warning")
+            if segment_count < 5:
+                add_debug_log("⚠️ CRITICAL: Less than 5 segments - cloning quality will be poor!", "error")
+        else:
+            add_debug_log(f"✅ Created {segment_count} segments from recordings - good for cloning!", "success")
+        
+        # Automatically generate .pth file
+        add_debug_log("", "info")
+        add_debug_log("🔄 Automatically generating .pth file...", "info")
+        
+        pth_success = generate_conditioning_latents(voice_name)
+        
+        if pth_success:
+            pth_message = "Voice ready! .pth file created for instant loading."
+        else:
+            pth_message = "Voice segments created. .pth generation failed (see logs)."
+        
+        # Determine recommendation
+        if segment_count < 5:
+            recommendation = 'Critical: Need at least 5 segments (record more clips)'
+        elif segment_count < 7:
+            recommendation = 'Warning: Recommended 7+ segments (record more clips)'
+        else:
+            recommendation = 'Good for cloning!'
+        
+        return jsonify({
+            'success': True,
+            'message': f'Processed {segment_count} segments from {len(recorded_files)} recordings',
+            'files': all_processed_files,
+            'segment_count': segment_count,
+            'pth_generated': pth_success,
+            'recommendation': recommendation,
+            'status': pth_message
+        })
+        
+    except Exception as e:
+        add_debug_log(f"Error processing recordings: {str(e)}", "error")
+        import traceback
+        add_debug_log(traceback.format_exc(), "error")
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/cancel', methods=['POST'])

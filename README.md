@@ -183,6 +183,40 @@ Then open http://localhost:5000 in your browser.
 **Output Location**: Files are automatically saved to `%USERPROFILE%\Music\Tortoise Output`  
 **File Naming**: `{voice}-{preset}-{candidates}x-{number}.wav` (e.g., `tom-fast-1x-001.wav`)
 
+### Voice Cloning (NEW!)
+
+**Two ways to add your own voice with fully automatic preprocessing!**
+
+#### Method 1: Upload Files 📁
+Upload audio files - system automatically processes:
+- ✂️ Splits into 10-second segments
+- 🎵 Resamples to 22050Hz
+- � **Normalizes to [-1, 1] range (critical for voice matching)**
+- �💾 Converts to standard 16-bit PCM WAV format
+- 📊 Converts stereo to mono
+- ✅ Validates audio quality (detects silent/corrupted files)
+- ⚡ **Automatically generates .pth file for instant loading!**
+
+#### Method 2: Record Voice 🎙️ (NEW!)
+Record directly in the browser:
+- 🎤 Record 7-10 clips of 30 seconds each
+- 📖 Read random paragraphs displayed on screen
+- 🔄 Automatic processing and .pth generation
+- ⚡ Voice ready instantly!
+
+**Quick start**:
+1. Click "Manage Voices" tab in web UI
+2. Choose "Upload Files" or "Record Voice"
+3. Upload 70+ seconds OR record 7-10 clips
+4. System automatically processes and creates .pth file
+5. Voice ready instantly - select and generate!
+
+**Critical Minimum**: 5 segments (50 seconds) - poor quality  
+**Recommended Minimum**: 7 segments (70 seconds) - acceptable quality  
+**Optimal**: 10+ segments (100+ seconds) - best quality
+
+See `VOICE_CLONING_GUIDE.md` for detailed instructions and best practices.
+
 ### Voice Preparation
 
 For faster voice loading, pre-compute conditioning latents (.pth files):
@@ -297,6 +331,7 @@ See `SPEED_GUIDE.md` for detailed performance information.
 ## Files and Documentation
 
 - `WEB_UI_README.md` - Comprehensive web UI documentation
+- `VOICE_CLONING_GUIDE.md` - **NEW!** Voice cloning with automatic preprocessing
 - `QUICK_START.md` - Quick reference guide
 - `SPEED_GUIDE.md` - Performance characteristics explained
 - `TROUBLESHOOTING_RESULTS.md` - Common issues and solutions
