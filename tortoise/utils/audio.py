@@ -108,20 +108,26 @@ def load_voice(voice, extra_voice_dirs=[]):
     voices = get_voices(extra_voice_dirs)
     paths = voices[voice]
     pth_files = [p for p in paths if p.endswith('.pth')]
-    if len(paths) == 1 and paths[0].endswith('.pth'):
-        return None, torch.load(paths[0])
-    else:
-        conds = []
-        for cond_path in paths:
-            if not cond_path.endswith('.pth'):
-                c = load_audio(cond_path, 22050)
-                conds.append(c)
 
-        if not pth_files:
-            pth_save_path = os.path.join(os.path.dirname(paths[0]), f"{voice}.pth")
-            save_pth(conds, pth_save_path)
+    # Prefer precomputed conditioning latents when available for consistency and faster loads.
+    if pth_files:
+        # If multiple .pth files exist (eg. backups), pick the most recently modified.
+        best_pth = max(pth_files, key=lambda p: os.path.getmtime(p))
+        latents = torch.load(best_pth, map_location='cpu')
+        return None, latents
 
-        return conds, None
+    conds = []
+    for cond_path in paths:
+        if cond_path.endswith('.pth'):
+            continue
+        c = load_audio(cond_path, 22050)
+        conds.append(c)
+
+    if conds:
+        pth_save_path = os.path.join(os.path.dirname(paths[0]), f"{voice}.pth")
+        save_pth(conds, pth_save_path)
+
+    return conds, None
 
 
 def load_voices(voices, extra_voice_dirs=[]):

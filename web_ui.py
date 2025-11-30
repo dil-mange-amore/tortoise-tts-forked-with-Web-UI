@@ -9,13 +9,15 @@ import subprocess
 import threading
 import time
 from pathlib import Path
-from flask import Flask, render_template, request, jsonify, send_file
+from flask import Flask, render_template, request, jsonify
 from werkzeug.utils import secure_filename
 import torch
 import torchaudio
 from tortoise.api import TextToSpeech
 from tortoise.utils.audio import load_audio, load_voices
-import numpy as np
+
+# Avoid duplicate OpenMP runtime crashes on Windows when NumPy/Numba and PyTorch both load Intel runtimes.
+os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 
 app = Flask(__name__)
 app.config['UPLOAD_FOLDER'] = 'tortoise/voices'

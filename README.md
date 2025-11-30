@@ -19,13 +19,12 @@ https://huggingface.co/spaces/Manmay/tortoise-tts
 **New! Web UI for easy TTS generation with visual interface, real-time progress tracking, and audio playlist.**
 
 ```shell
-conda create --name tortoise python=3.11 numba inflect -y
+conda create --name tortoise python=3.11 -y
 conda activate tortoise
 pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
 git clone https://github.com/neonbjb/tortoise-tts.git
 cd tortoise-tts
 pip install -e .
-pip install flask soundfile
 
 # Start the web interface
 python web_ui.py
@@ -80,18 +79,20 @@ This will:
 1. run tortoise python setup install script
 
 ```shell
-conda create --name tortoise python=3.11 numba inflect -y
+conda create --name tortoise python=3.11 -y
 conda activate tortoise
 pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
 pip install transformers==4.29.2
 git clone https://github.com/neonbjb/tortoise-tts.git
 cd tortoise-tts
 pip install -e .
-pip install flask soundfile==0.12.1
 ```
 
+> [!TIP]
+> Need DeepSpeed acceleration on Linux? Install it after the base setup with `pip install -e .[deepspeed]` or `pip install "deepspeed>=0.10.0"`.
+
 > [!IMPORTANT]
-> **Python 3.11 is required** - PyTorch does not support Python 3.13+. Use `soundfile==0.12.1` to avoid compatibility issues.
+> **Python 3.11 is recommended (3.10 supported)** - PyTorch does not support Python 3.13+. Use `soundfile==0.12.1` to avoid compatibility issues.
 
 Optionally, pytorch can be installed in the base environment, so that other conda environments can use it too. To do this, simply send the `conda install pytorch...` line before activating the tortoise environment.
 

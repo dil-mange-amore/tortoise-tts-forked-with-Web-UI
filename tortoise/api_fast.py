@@ -1,14 +1,10 @@
 import os
 import random
-import uuid
 from time import time
-from urllib import request
 
 import torch
 import torch.nn.functional as F
-import progressbar
 import torchaudio
-import numpy as np
 from tortoise.models.classifier import AudioMiniEncoderWithClassifierHead
 from tortoise.models.diffusion_decoder import DiffusionTts
 from tortoise.models.autoregressive import UnifiedVoice
@@ -26,7 +22,6 @@ from tortoise.utils.wav2vec_alignment import Wav2VecAlignment
 from contextlib import contextmanager
 from tortoise.models.stream_generator import init_stream_support
 from huggingface_hub import hf_hub_download
-pbar = None
 init_stream_support()
 DEFAULT_MODELS_DIR = os.path.join(os.path.expanduser('~'), '.cache', 'tortoise', 'models')
 MODELS_DIR = os.environ.get('TORTOISE_MODELS_DIR', DEFAULT_MODELS_DIR)
